@@ -1,0 +1,8 @@
+node_modules/
+cdk.out/
+output/
+config.json
+token.txt
+cookies.txt
+*.zip
+.DS_Store

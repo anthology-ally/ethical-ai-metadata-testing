@@ -1,0 +1,7 @@
+{
+  "name": "caption-suggestion-fn",
+  "version": "1.0.0",
+  "dependencies": {
+    "pdfjs-dist": "^6.2.108"
+  }
+}
