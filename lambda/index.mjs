@@ -1,7 +1,8 @@
-const getCaptionSuggestionUrl = (clientId, courseId, fileId) =>
+const getCaptionSuggestionUrl = (clientId, courseId, fileId, lang) =>
   process.env.CAPTION_SUGGESTION_URL.replace("{courseId}", courseId)
     .replace("{clientId}", clientId)
-    .replace("{fileId}", fileId);
+    .replace("{fileId}", fileId)
+    .replace("{lang}", encodeURIComponent(lang));
 
 const getContentUrl = (clientId, courseId) =>
   process.env.GET_CONTENT_URL.replace("{courseId}", courseId).replace(
@@ -21,7 +22,7 @@ const getDocumentContentUrl = (clientId, courseId, fileId) =>
 
 import { extractImagesWithPrecedingText } from "./pdf-extractor.js";
 
-async function getPdfCaptionSuggestions(clientId, courseId, fileId, token) {
+async function getPdfCaptionSuggestions(clientId, courseId, fileId, token, lang) {
   const url = getPdfFileDownloadUrl(clientId, courseId, fileId);
   const embedInfo = await fetch(url, {
     method: "GET",
@@ -46,7 +47,8 @@ async function getPdfCaptionSuggestions(clientId, courseId, fileId, token) {
       process.env.PDF_CAPTION_SUGGESTION_URL.replace("{courseId}", courseId)
         .replace("{clientId}", clientId)
         .replace("{fileId}", fileId)
-        .replace("{figureIndex}", imageData.index);
+        .replace("{figureIndex}", imageData.index)
+        .replace("{lang}", encodeURIComponent(lang));
 
     const res = await fetch(pdfCaptionSuggestionUrl, {
       method: "POST",
@@ -67,10 +69,66 @@ async function getPdfCaptionSuggestions(clientId, courseId, fileId, token) {
         error: 502,
         message: `Caption service returned empty text for figure ${imageData.index}`,
       };
-    captions.push(json.text);
+    captions.push({ figureIndex: imageData.index, suggestion: json.text });
   }
 
   return captions;
+}
+
+export async function getPdfTitleSuggestion(clientId, courseId, item, token, lang) {
+  const existingTitle = typeof item.title === "string" ? item.title.trim() : "";
+  if (existingTitle) {
+    return {
+      type: "title",
+      language: lang,
+      existingTitle,
+      suggestion: "",
+      status: "skipped_existing_title",
+    };
+  }
+
+  const url = process.env.PDF_TITLE_SUGGESTION_URL
+    .replace("{courseId}", courseId)
+    .replace("{clientId}", clientId)
+    .replace("{fileId}", item.externalId)
+    .replace("{lang}", encodeURIComponent(lang));
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      accept: "*/*",
+      authorization: `Bearer ${token}`,
+    },
+  });
+
+  if (!res.ok) return { error: res.status };
+  const json = await res.json();
+  if (json?.reason === "NotTagged") {
+    return {
+      type: "title",
+      language: lang,
+      existingTitle: "",
+      suggestion: "",
+      status: "not_tagged",
+    };
+  }
+  const suggestion = typeof json?.text === "string" ? json.text.trim() : "";
+  if (!suggestion) {
+    return {
+      type: "title",
+      language: lang,
+      existingTitle: "",
+      suggestion: "",
+      status: "no_suggestion",
+    };
+  }
+
+  return {
+    type: "title",
+    language: lang,
+    existingTitle: "",
+    suggestion: suggestion.trim(),
+    status: "suggested",
+  };
 }
 
 async function getCaptionSuggestion(
@@ -79,10 +137,11 @@ async function getCaptionSuggestion(
   fileId,
   fileType,
   token,
+  lang,
 ) {
   const captions = [];
   if (fileType === "image") {
-    const url = getCaptionSuggestionUrl(clientId, courseId, fileId);
+    const url = getCaptionSuggestionUrl(clientId, courseId, fileId, lang);
 
     const res = await fetch(url, {
       method: "POST",
@@ -106,7 +165,7 @@ async function getCaptionSuggestion(
   }
 
   if (fileType === "pdf") {
-    return getPdfCaptionSuggestions(clientId, courseId, fileId, token);
+    return getPdfCaptionSuggestions(clientId, courseId, fileId, token, lang);
   }
 
   if (fileType === "application/x-document") {
@@ -144,31 +203,73 @@ async function getAvailableContent(clientId, courseId, token) {
   return json.content;
 }
 
-async function getCaptionResults(clientId, courseId, token, data, label) {
-  // Check content type to determine if pdf or image
-  return Promise.all(
+export async function getCaptionResults(clientId, courseId, token, data, label, lang, includePdfs) {
+  const results = await Promise.all(
     data.map(async (item) => {
+      const name = `${label}/${item.name}`;
+      if (item.fileType === "pdf") {
+        if (!includePdfs) return { captions: [], pdfs: [] };
+
+        const [figureSuggestions, titleResult] = await Promise.all([
+          getPdfCaptionSuggestions(clientId, courseId, item.externalId, token, lang),
+          getPdfTitleSuggestion(clientId, courseId, item, token, lang),
+        ]);
+        if (figureSuggestions?.error || titleResult?.error) {
+          const error = figureSuggestions?.error ? figureSuggestions : titleResult;
+          throw new Error(
+            `PDF suggestion request failed (clientId=${clientId}, courseId=${courseId}, fileId=${item.externalId}, label=${label}, status=${error.error}): ${error.message || "PDF suggestion request failed"}`,
+          );
+        }
+        return {
+          captions: [],
+          pdfs: [
+            ...figureSuggestions.map(({ figureIndex, suggestion }) => ({
+              name,
+              type: "alt-text",
+              language: lang,
+              figureIndex,
+              existingTitle: "",
+              suggestion,
+              status: "suggested",
+            })),
+            { name, ...titleResult },
+          ],
+        };
+      }
+
       const captions = await getCaptionSuggestion(
         clientId,
         courseId,
         item.externalId,
         item.fileType,
         token,
+        lang,
       );
       if (captions?.error)
         throw new Error(
-          `Caption request failed (clientId=${clientId}, courseId=${courseId}, fileId=${item.externalId}, label=${label}, status=${captions.error}): ${captions.message || "Caption service request failed"}`,
+          `Caption request failed (clientId=${clientId}, courseId=${courseId}, fileId=${item.externalId}, name=${JSON.stringify(item.name)}, fileType=${item.fileType}, lang=${lang}, label=${label}, status=${captions.error}): ${captions.message || "Caption service request failed"}`,
         );
       return {
-        name: `${label}/${item.name}`,
-        caption: captions.join("|"),
+        captions: captions.map((caption) => ({ name, caption })),
+        pdfs: [],
       };
     }),
   );
+
+  return {
+    captions: results.flatMap(({ captions }) => captions),
+    pdfs: results.flatMap(({ pdfs }) => pdfs),
+  };
 }
 
 export const handler = async (event) => {
-  const { clientId, courseId, label } = event.queryStringParameters ?? {};
+  const {
+    clientId,
+    courseId,
+    label,
+    lang = "en",
+    includePdfs = "true",
+  } = event.queryStringParameters ?? {};
   const token = event.headers?.authorization?.replace(/^Bearer\s+/i, "");
 
   if (!courseId || !token || !label) {
@@ -198,6 +299,8 @@ export const handler = async (event) => {
       token,
       content,
       label,
+      lang,
+      includePdfs.toLowerCase() !== "false",
     );
   } catch (err) {
     return {
