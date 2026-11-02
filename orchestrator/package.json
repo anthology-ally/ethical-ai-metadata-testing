@@ -1,0 +1,9 @@
+{
+  "name": "ethical-ai-metadata-testing-orchestrator",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@aws-sdk/client-ssm": "^3.1159.0",
+    "exceljs": "^4.4.0"
+  }
+}

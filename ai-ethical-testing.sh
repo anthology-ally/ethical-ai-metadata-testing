@@ -10,6 +10,11 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if ! jq empty config.json >/dev/null 2>&1; then
+  echo "config.json is not valid JSON. Check for trailing commas or missing double quotes." >&2
+  exit 1
+fi
+
 start_response=$(curl -s \
   -X POST \
   -H "Content-Type: application/json" \
@@ -32,7 +37,7 @@ while true; do
   case "$status" in
     COMPLETE)
       echo "Job complete."
-      echo "$status_response" | jq -r '.downloadUrl'
+      echo "Excel results: $(echo "$status_response" | jq -r '.downloadUrl')"
       exit 0
       ;;
     FAILED)

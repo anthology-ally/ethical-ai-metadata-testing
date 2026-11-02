@@ -4,6 +4,7 @@ import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
 import { BedrockClient, GetFoundationModelCommand } from '@aws-sdk/client-bedrock';
 import { randomUUID } from 'node:crypto';
+import { createResultsWorkbook } from './results-workbook.mjs';
 
 const lambdaClient = new LambdaClient();
 const s3 = new S3Client();
@@ -11,6 +12,8 @@ const ssm = new SSMClient();
 const bedrock = new BedrockClient();
 
 const jobKey = (jobId) => `jobs/${jobId}.json`;
+const reportFilename = 'ethical-ai-metadata-testing-results.xlsx';
+const workbookContentType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 
 // Cross-region inference profile IDs (e.g. "us.anthropic.claude-sonnet-5")
 // aren't valid GetFoundationModel identifiers — strip the region prefix to
@@ -26,9 +29,9 @@ async function getModelDisplayName() {
   return `${modelDetails.providerName} ${modelDetails.modelName}`;
 }
 
-async function fetchCaptionsForCourse(clientId, courseId, label, token) {
+async function fetchCaptionsForCourse(clientId, courseId, label, token, lang) {
   const event = {
-    queryStringParameters: { courseId, label, clientId },
+    queryStringParameters: { courseId, label, clientId, lang },
     headers: { authorization: `Bearer ${token}` },
   };
   const res = await lambdaClient.send(new InvokeCommand({
@@ -40,28 +43,30 @@ async function fetchCaptionsForCourse(clientId, courseId, label, token) {
   return JSON.parse(payload.body);
 }
 
-function toCsv(rows, modelName) {
-  const escape = (val) => `"${String(val).replace(/"/g, '""')}"`;
-  const header = 'name,caption';
-  const lines = rows.map(r => `${escape(r.name)},${escape(r.caption)}`);
-  return [`Model: ${modelName}`, '', header, ...lines].join('\n');
-}
-
-async function uploadResultsCsv(csv) {
-  const key = `results/${Date.now()}.csv`;
+async function uploadResultsWorkbook(captionRows, pdfRows, modelName) {
+  const key = `results/${Date.now()}.xlsx`;
   await s3.send(new PutObjectCommand({
     Bucket: process.env.RESULTS_BUCKET,
     Key: key,
-    Body: csv,
-    ContentType: 'text/csv',
+    Body: await createResultsWorkbook(captionRows, pdfRows, modelName),
+    ContentType: workbookContentType,
   }));
   return getSignedUrl(s3, new GetObjectCommand({
     Bucket: process.env.RESULTS_BUCKET,
     Key: key,
+    ResponseContentType: workbookContentType,
+    ResponseContentDisposition: `attachment; filename="${reportFilename}"`,
   }), { expiresIn: 86400 });
 }
 
 async function postToTeams(downloadUrl, modelName) {
+  const { Parameter } = await ssm.send(new GetParameterCommand({
+    Name: process.env.TEAMS_WEBHOOK_PARAMETER_NAME,
+    WithDecryption: true,
+  }));
+  const webhookUrl = Parameter?.Value;
+  if (!webhookUrl) throw new Error('Teams webhook secret has no string value');
+
   const card = {
     type: 'AdaptiveCard',
     $schema: 'http://adaptivecards.io/schemas/adaptive-card.json',
@@ -81,7 +86,7 @@ async function postToTeams(downloadUrl, modelName) {
       },
       {
         type: 'TextBlock',
-        text: 'Link expires in 24 hours.',
+        text: 'The workbook contains Image Captions, PDF Results, and Run Info sheets. The link expires in 24 hours.',
         isSubtle: true,
         wrap: true,
       },
@@ -89,16 +94,16 @@ async function postToTeams(downloadUrl, modelName) {
     actions: [
       {
         type: 'Action.OpenUrl',
-        title: 'Download CSV',
+        title: 'Download Excel results',
         url: downloadUrl,
       },
     ],
   };
 
-  const res = await fetch(process.env.TEAMS_WEBHOOK_URL, {
+  const res = await fetch(webhookUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ downloadUrl, modelName, card }),
+    body: JSON.stringify({ downloadUrl, report_filename: reportFilename, modelName, card }),
   });
   if (!res.ok) throw new Error(`Teams webhook failed: ${res.status}`);
 }
@@ -129,15 +134,21 @@ async function runJob(jobId, clientId, courses) {
   try {
     const modelName = await getModelDisplayName();
 
-    const allRows = (await Promise.all(
-      courses.map(({ courseId, name, token: courseToken }) => fetchCaptionsForCourse(clientId, courseId, name, courseToken))
-    )).flat();
+    const courseResults = await Promise.all(
+      courses.map(({ courseId, name, token: courseToken, lang = 'en' }) =>
+        fetchCaptionsForCourse(clientId, courseId, name, courseToken, lang))
+    );
+    const captionRows = courseResults.flatMap(({ captions }) => captions);
+    const pdfRows = courseResults.flatMap(({ pdfs }) => pdfs);
 
-    const csv = toCsv(allRows, modelName);
-    const downloadUrl = await uploadResultsCsv(csv);
+    const downloadUrl = await uploadResultsWorkbook(captionRows, pdfRows, modelName);
     await postToTeams(downloadUrl, modelName);
 
-    await putJobStatus(jobId, { status: 'COMPLETE', downloadUrl, updatedAt: Date.now() });
+    await putJobStatus(jobId, {
+      status: 'COMPLETE',
+      downloadUrl,
+      updatedAt: Date.now(),
+    });
   } catch (err) {
     console.error(`Job ${jobId} failed:`, err);
     await putJobStatus(jobId, { status: 'FAILED', error: err.message, updatedAt: Date.now() });
@@ -165,8 +176,16 @@ export const handler = async (event, context) => {
     return { statusCode: 200, body: JSON.stringify(job) };
   }
 
-  const body = JSON.parse(event.body ?? '{}');
-  const { clientId, courses } = body;
+  let body;
+  try {
+    body = JSON.parse(event.body ?? '{}');
+  } catch {
+    return {
+      statusCode: 400,
+      body: JSON.stringify({ error: 'Request body must be valid JSON' }),
+    };
+  }
+  const { clientId, courses } = body ?? {};
 
   if (!clientId || !Array.isArray(courses) || courses.length === 0) {
     return {

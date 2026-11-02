@@ -11,10 +11,12 @@ export class CaptionStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
 
-    const teamsWebhookUrl = process.env.TEAMS_WEBHOOK_URL;
-    if (!teamsWebhookUrl) {
-      throw new Error('Set TEAMS_WEBHOOK_URL before synthesizing or deploying the stack.');
-    }
+    const teamsWebhookParameterName = '/ally/ethical-ai-metadata-testing/teams-webhook';
+    const teamsWebhookParameter = ssm.StringParameter.fromStringParameterName(
+      this,
+      'TeamsWebhookParameter',
+      teamsWebhookParameterName,
+    );
 
     const resultsBucket = new s3.Bucket(this, 'ResultsBucket', {
       removalPolicy: cdk.RemovalPolicy.RETAIN,
@@ -43,9 +45,11 @@ export class CaptionStack extends cdk.Stack {
         GET_DOCUMENT_CONTENT_URL:
         'https://performance.ally.ac/api/v1/{clientId}/courses/{courseId}/rich-content/{fileId}/link',
         PDF_CAPTION_SUGGESTION_URL:
-          'https://performance.ally.ac/api/v2/clients/{clientId}/courses/{courseId}/pdf/alttext/{fileId}/suggestion?figureIndex={figureIndex}&lang=en',
+          'https://performance.ally.ac/api/v2/clients/{clientId}/courses/{courseId}/pdf/alttext/{fileId}/suggestion?figureIndex={figureIndex}&lang={lang}',
+        PDF_TITLE_SUGGESTION_URL:
+          'https://performance.ally.ac/api/v2/clients/{clientId}/courses/{courseId}/pdf/title/{fileId}/suggestion?lang={lang}',
         CAPTION_SUGGESTION_URL:
-          'https://performance.ally.ac/api/v2/clients/{clientId}/courses/{courseId}/files/{fileId}/captions/suggestion?lang=en',
+          'https://performance.ally.ac/api/v2/clients/{clientId}/courses/{courseId}/files/{fileId}/captions/suggestion?lang={lang}',
         GET_CONTENT_URL:
           'https://performance.ally.ac/api/v1/{clientId}/reports/courses/{courseId}/content',
         GET_PDF_CONTENT_URL:
@@ -62,19 +66,29 @@ export class CaptionStack extends cdk.Stack {
       runtime: lambda.Runtime.NODEJS_24_X,
       architecture: lambda.Architecture.ARM_64,
       handler: 'index.handler',
-      code: lambda.Code.fromAsset('orchestrator'),
+      code: lambda.Code.fromAsset('orchestrator', {
+        exclude: ['node_modules', 'test'],
+        bundling: {
+          image: lambda.Runtime.NODEJS_24_X.bundlingImage,
+          command: [
+            'bash', '-c',
+            'cp -au /asset-input/* /asset-output/ && cd /asset-output && npm ci --omit=dev --cache /tmp/.npm-cache',
+          ],
+        },
+      }),
       timeout: cdk.Duration.minutes(15),
       environment: {
         CAPTIONS_FUNCTION_NAME: fn.functionName,
         RESULTS_BUCKET: resultsBucket.bucketName,
         MODEL_ID_PARAMETER_NAME: modelIdParameterName,
-        TEAMS_WEBHOOK_URL: teamsWebhookUrl,
+        TEAMS_WEBHOOK_PARAMETER_NAME: teamsWebhookParameterName,
       },
     });
 
     fn.grantInvoke(orchestratorFn);
     resultsBucket.grantPut(orchestratorFn);
     resultsBucket.grantRead(orchestratorFn);
+    teamsWebhookParameter.grantRead(orchestratorFn);
 
     ssm.StringParameter.fromStringParameterName(
       this,

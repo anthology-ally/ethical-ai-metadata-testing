@@ -4,9 +4,11 @@
   "bin": { "app": "bin/app.js" },
   "scripts": {
     "build": "tsc",
-    "cdk": "cdk"
+    "cdk": "cdk",
+    "test": "node --test test/*.test.mjs orchestrator/test/*.test.mjs"
   },
   "devDependencies": {
+    "@types/node": "^25.5.0",
     "aws-cdk": "^2",
     "aws-cdk-lib": "^2",
     "constructs": "^10",
