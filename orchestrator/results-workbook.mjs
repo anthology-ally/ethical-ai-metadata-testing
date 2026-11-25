@@ -13,7 +13,7 @@ export async function createResultsWorkbook(captionRows, pdfRows, modelName, gen
     },
     {
       name: 'PDF Results',
-      columns: ['name', 'type', 'language', 'figureIndex', 'existingTitle', 'suggestion', 'status'],
+      columns: ['filename', 'name', 'type', 'language', 'figureIndex', 'existingTitle', 'suggestion', 'status'],
       rows: pdfRows,
     },
     {

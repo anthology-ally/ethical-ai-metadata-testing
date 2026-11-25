@@ -245,6 +245,7 @@ async function downloadPdf(url) {
     throw new Error(`Failed to download PDF: ${res.status} ${res.statusText}`);
   }
   const arrayBuffer = await res.arrayBuffer();
+  console.log(`Downloaded PDF, size: ${arrayBuffer.byteLength} bytes`);
   return Buffer.from(arrayBuffer);
 }
 
@@ -254,9 +255,17 @@ async function downloadPdf(url) {
  * paragraph preceding that image.
  */
 async function extractImagesWithPrecedingText(url) {
-  const pdfBuffer = await downloadPdf(url);
-  console.log(`Downloaded PDF from ${url}, size: ${pdfBuffer.length} bytes`);
-  return await extractFromBuffer(pdfBuffer);
+  try {
+    console.log(`Starting PDF extraction from: ${url}`);
+    const pdfBuffer = await downloadPdf(url);
+    console.log(`Downloaded PDF, size: ${pdfBuffer.length} bytes`);
+    const result = await extractFromBuffer(pdfBuffer);
+    console.log(`Extraction complete: found ${result.length} images`);
+    return result;
+  } catch (error) {
+    console.error(`PDF extraction failed: ${error.message}`);
+    throw error;
+  }
 }
 
 module.exports = {

@@ -24,6 +24,10 @@ import { extractImagesWithPrecedingText } from "./pdf-extractor.js";
 
 async function getPdfCaptionSuggestions(clientId, courseId, fileId, token, lang) {
   const url = getPdfFileDownloadUrl(clientId, courseId, fileId);
+  console.log(`=== Fetching embedInfo ===`);
+  console.log(`URL: ${url}`);
+  console.log(`FileId: ${fileId}`);
+  
   const embedInfo = await fetch(url, {
     method: "GET",
     headers: {
@@ -33,22 +37,102 @@ async function getPdfCaptionSuggestions(clientId, courseId, fileId, token, lang)
     },
   });
 
-  if (!embedInfo.ok) return { error: embedInfo.status };
+  console.log(`Response status: ${embedInfo.status} ${embedInfo.statusText}`);
+  
+  if (!embedInfo.ok) {
+    const errorBody = await embedInfo.text();
+    console.error(`ERROR: Status ${embedInfo.status}`);
+    console.error(`Error response: ${errorBody?.substring(0, 500)}`);
+    return { error: embedInfo.status, message: `HTTP ${embedInfo.status}: ${errorBody}` };
+  }
 
   const embedJson = await embedInfo.json();
-  const pdfUrl = embedJson?.urls?.pdf;
-  if (!pdfUrl)
-    return { error: 404, message: "PDF URL not found in embed info" };
+  console.log(`embedInfo response: ${JSON.stringify(embedJson)}`);
+  console.log(`embedInfo status: ${embedJson.status}`);
+  console.log(`embedInfo urls keys: ${Object.keys(embedJson.urls || {}).join(', ')}`);
+  
+  // Check if PDF conversion is complete (status can be "Done" or "Complete")
+  const isComplete = embedJson.status === "Done" || embedJson.status === "Complete";
+  if (!isComplete) {
+    console.warn(`PDF not ready. Status: ${embedJson.status}`);
+    return { 
+      error: 503, 
+      message: `PDF conversion in progress (status: ${embedJson.status}). Available URLs: ${Object.keys(embedJson.urls || {}).join(', ')}`
+    };
+  }
+  
+  // Try multiple common PDF URL paths
+  const pdfUrl = embedJson?.urls?.pdf 
+    || embedJson?.urls?.Pdf 
+    || embedJson?.urls?.PDF
+    || embedJson?.url 
+    || embedJson?.pdfUrl 
+    || embedJson?.pdf_url
+    || embedJson?.downloadUrl
+    || embedJson?.link
+    || embedJson?.href
+    || embedJson?.contentUrl
+    || embedJson?.embed?.url;
+  
+  if (!pdfUrl) {
+    console.error(`Failed to find PDF URL in embedInfo despite complete status.`);
+    console.error(`Full response: ${JSON.stringify(embedJson, null, 2)}`);
+    console.error(`URLs object: ${JSON.stringify(embedJson.urls, null, 2)}`);
+    console.error(`Available URL keys: ${Object.keys(embedJson.urls || {}).join(', ')}`);
+    
+    return { 
+      error: 404, 
+      message: `PDF URL not found in embed info. Available URLs: ${Object.keys(embedJson.urls || {}).join(', ')}`
+    };
+  }
 
   const pdfData = await extractImagesWithPrecedingText(pdfUrl);
+  console.log(`Extracted ${pdfData.length} images from PDF`);
+  
+  if (pdfData.length === 0) {
+    console.warn(`No images found in PDF, returning empty captions`);
+    return [];
+  }
+  
   const captions = [];
   for (const imageData of pdfData) {
-    const pdfCaptionSuggestionUrl =
-      process.env.PDF_CAPTION_SUGGESTION_URL.replace("{courseId}", courseId)
-        .replace("{clientId}", clientId)
-        .replace("{fileId}", fileId)
-        .replace("{figureIndex}", imageData.index)
-        .replace("{lang}", encodeURIComponent(lang));
+    console.log(`Processing image: index=${imageData.index}, page=${imageData.page}, textLength=${imageData.text?.length || 0}`);
+    
+    if (!imageData.text) {
+      console.warn(`Image at index ${imageData.index} has empty context, skipping`);
+      continue;
+    }
+
+    const figureIndexRaw = String(imageData.index);
+    const langEncoded = encodeURIComponent(lang);
+    
+    // Build URL carefully
+    let pdfCaptionSuggestionUrl = process.env.PDF_CAPTION_SUGGESTION_URL;
+    console.log(`Template URL: ${pdfCaptionSuggestionUrl}`);
+    
+    pdfCaptionSuggestionUrl = pdfCaptionSuggestionUrl.replace("{clientId}", clientId);
+    console.log(`After clientId: ${pdfCaptionSuggestionUrl}`);
+    
+    pdfCaptionSuggestionUrl = pdfCaptionSuggestionUrl.replace("{courseId}", courseId);
+    console.log(`After courseId: ${pdfCaptionSuggestionUrl}`);
+    
+    pdfCaptionSuggestionUrl = pdfCaptionSuggestionUrl.replace("{fileId}", fileId);
+    console.log(`After fileId: ${pdfCaptionSuggestionUrl}`);
+    
+    pdfCaptionSuggestionUrl = pdfCaptionSuggestionUrl.replace("{figureIndex}", figureIndexRaw);
+    console.log(`After figureIndex: ${pdfCaptionSuggestionUrl}`);
+    
+    pdfCaptionSuggestionUrl = pdfCaptionSuggestionUrl.replace("{lang}", langEncoded);
+    console.log(`Final URL: ${pdfCaptionSuggestionUrl}`);
+
+    const contextText = imageData.text.substring(0, 5000);
+    const requestBody = { context: contextText };
+    console.log(`Request body keys: ${Object.keys(requestBody).join(', ')}`);
+    console.log(`Context length: ${contextText.length}`);
+    
+    const bodyJson = JSON.stringify(requestBody);
+    console.log(`Request JSON length: ${bodyJson.length}`);
+    console.log(`Request JSON valid: ${bodyJson.startsWith('{')}`);
 
     const res = await fetch(pdfCaptionSuggestionUrl, {
       method: "POST",
@@ -58,12 +142,23 @@ async function getPdfCaptionSuggestions(clientId, courseId, fileId, token, lang)
         "accept-language": "en-US,en;q=0.9,cs;q=0.8",
         authorization: `Bearer ${token}`,
       },
-      body: JSON.stringify({ context: imageData.text }),
+      body: bodyJson,
     });
 
-    if (!res.ok)
-      return { error: res.status, message: await res.text() };
+    console.log(`Caption request response status: ${res.status}`);
+    
+    if (!res.ok) {
+      const errorText = await res.text();
+      console.error(`Caption request FAILED`);
+      console.error(`URL: ${pdfCaptionSuggestionUrl}`);
+      console.error(`Status: ${res.status}`);
+      console.error(`Response: ${errorText.substring(0, 1000)}`);
+      return { error: res.status, message: `Caption request error: ${errorText}` };
+    }
+    
     const json = await res.json();
+    console.log(`Caption response: ${JSON.stringify(json).substring(0, 200)}`);
+    
     if (typeof json.text !== "string" || !json.text.trim())
       return {
         error: 502,
@@ -100,7 +195,10 @@ export async function getPdfTitleSuggestion(clientId, courseId, item, token, lan
     },
   });
 
-  if (!res.ok) return { error: res.status };
+  if (!res.ok) {
+    const errorText = await res.text();
+    return { error: res.status, message: `Title suggestion failed: ${errorText}` };
+  }
   const json = await res.json();
   if (json?.reason === "NotTagged") {
     return {
@@ -192,14 +290,33 @@ async function getCaptionSuggestion(
 }
 
 async function getAvailableContent(clientId, courseId, token) {
-  const res = await fetch(getContentUrl(clientId, courseId), {
+  const url = getContentUrl(clientId, courseId);
+  console.log(`=== Fetching Content ===`);
+  console.log(`URL: ${url}`);
+  console.log(`Client ID: ${clientId}`);
+  console.log(`Course ID: ${courseId}`);
+  console.log(`Token length: ${token?.length || 0}`);
+  console.log(`Token starts with: ${token?.substring(0, 20) || 'null'}`);
+  
+  const res = await fetch(url, {
     method: "GET",
-    headers: { authorization: `Bearer ${token}` },
+    headers: { 
+      authorization: `Bearer ${token}`,
+    },
   });
+  
+  console.log(`Response status: ${res.status} ${res.statusText}`);
+  console.log(`Response headers: ${JSON.stringify([...res.headers.entries()])}`);
+  
   if (!res.ok) {
-    return { error: res.status };
+    const errorBody = await res.text();
+    console.error(`ERROR: Status ${res.status}`);
+    console.error(`Error response: ${errorBody?.substring(0, 500)}`);
+    return { error: res.status, message: `HTTP ${res.status}: ${errorBody}` };
   }
+  
   const json = await res.json();
+  console.log(`Content array length: ${json.content?.length || 0}`);
   return json.content;
 }
 
@@ -216,8 +333,10 @@ export async function getCaptionResults(clientId, courseId, token, data, label, 
         ]);
         if (figureSuggestions?.error || titleResult?.error) {
           const error = figureSuggestions?.error ? figureSuggestions : titleResult;
+          const errorMessage = error?.message || "Unknown PDF error";
+          const errorCode = error?.error || "unknown";
           throw new Error(
-            `PDF suggestion request failed (clientId=${clientId}, courseId=${courseId}, fileId=${item.externalId}, label=${label}, status=${error.error}): ${error.message || "PDF suggestion request failed"}`,
+            `PDF suggestion request failed (clientId=${clientId}, courseId=${courseId}, fileId=${item.externalId}, label=${label}, status=${errorCode}): ${errorMessage}`,
           );
         }
         return {
@@ -225,6 +344,7 @@ export async function getCaptionResults(clientId, courseId, token, data, label, 
           pdfs: [
             ...figureSuggestions.map(({ figureIndex, suggestion }) => ({
               name,
+              filename: item.name,
               type: "alt-text",
               language: lang,
               figureIndex,
@@ -232,7 +352,7 @@ export async function getCaptionResults(clientId, courseId, token, data, label, 
               suggestion,
               status: "suggested",
             })),
-            { name, ...titleResult },
+            { name, filename: item.name, ...titleResult },
           ],
         };
       }
@@ -303,9 +423,16 @@ export const handler = async (event) => {
       includePdfs.toLowerCase() !== "false",
     );
   } catch (err) {
+    const errorMessage = err?.message || (typeof err === 'string' ? err : JSON.stringify(err));
+    console.error(`HANDLER ERROR CAUGHT`);
+    console.error(`Error type: ${typeof err}`);
+    console.error(`Error keys: ${Object.keys(err || {}).join(', ')}`);
+    console.error(`Error message: ${errorMessage}`);
+    const errorBody = JSON.stringify({ error: errorMessage });
+    console.error(`Returning body: ${errorBody}`);
     return {
       statusCode: 502,
-      body: JSON.stringify({ error: err.message }),
+      body: errorBody,
     };
   }
   const response = {

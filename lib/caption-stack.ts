@@ -40,7 +40,8 @@ export class CaptionStack extends cdk.Stack {
   },
         },
       ),
-      timeout: cdk.Duration.minutes(5),
+      timeout: cdk.Duration.minutes(10),
+      memorySize: 512,
       environment: {
         GET_DOCUMENT_CONTENT_URL:
         'https://performance.ally.ac/api/v1/{clientId}/courses/{courseId}/rich-content/{fileId}/link',

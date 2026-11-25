@@ -59,13 +59,15 @@ async function uploadResultsWorkbook(captionRows, pdfRows, modelName) {
   }), { expiresIn: 86400 });
 }
 
-async function postToTeams(downloadUrl, modelName) {
+async function postToTeams(downloadUrl, modelName, timestamp = Date.now()) {
   const { Parameter } = await ssm.send(new GetParameterCommand({
     Name: process.env.TEAMS_WEBHOOK_PARAMETER_NAME,
     WithDecryption: true,
   }));
   const webhookUrl = Parameter?.Value;
   if (!webhookUrl) throw new Error('Teams webhook secret has no string value');
+
+  const uniqueFilename = `ethical-ai-metadata-testing-results-${new Date(timestamp).toISOString().split('T')[0]}.xlsx`;
 
   const card = {
     type: 'AdaptiveCard',
@@ -103,7 +105,7 @@ async function postToTeams(downloadUrl, modelName) {
   const res = await fetch(webhookUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ downloadUrl, report_filename: reportFilename, modelName, card }),
+    body: JSON.stringify({ downloadUrl, report_filename: uniqueFilename, modelName, card }),
   });
   if (!res.ok) throw new Error(`Teams webhook failed: ${res.status}`);
 }
@@ -142,7 +144,8 @@ async function runJob(jobId, clientId, courses) {
     const pdfRows = courseResults.flatMap(({ pdfs }) => pdfs);
 
     const downloadUrl = await uploadResultsWorkbook(captionRows, pdfRows, modelName);
-    await postToTeams(downloadUrl, modelName);
+    const timestamp = Date.now();
+    await postToTeams(downloadUrl, modelName, timestamp);
 
     await putJobStatus(jobId, {
       status: 'COMPLETE',
